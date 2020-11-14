@@ -1,6 +1,6 @@
 setuptools==40.2.0
 python-socketio==4.2.0
 eventlet==0.21.0
-flask==0.12.2
+flask==1.0
 numpy==1.13.3
 chainer==2.1.0
