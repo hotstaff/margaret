@@ -9,7 +9,7 @@ import logging
 import time
 from threading import BoundedSemaphore
 import socketio
-from margaret.core import network
+from margaret import siobus
 
 
 LOGGER = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ class Client:
         # options
         self.host = options.get('host', "localhost")
         self.port = options.get('port', 5000)
-        self.layer = options.get('namespace', '/')
-        self.bus = network.BusWorker(self.host, self.port)
-        self.bus.set_layer(self.layer)
+        self.namespace = options.get('namespace', '/')
+        self.bus = siobus.BusWorker(self.host, self.port)
+        self.bus.set_namespace(self.namespace)
         self.buffer = options.get('buffer', 5)
         self._semaphore = BoundedSemaphore(self.buffer)
         self.on_default()
@@ -81,9 +81,9 @@ class Client:
         """On."""
         self.bus.on(name, callback)
 
-    def emit(self, event, data=None, layer_name=None):
+    def emit(self, event, data=None, namespace=None):
         """Emit."""
-        self.bus.emit(event, data, layer_name=layer_name)
+        self.bus.emit(event, data, namespace=namespace)
 
     def on_sync(self, name, callback):
         """On sync.
@@ -92,7 +92,7 @@ class Client:
         """
         self.bus.on(name, self.dec_sync_count_down(callback))
 
-    def emit_sync(self, event, data=None, layer_name=None):
+    def emit_sync(self, event, data=None, namespace=None):
         """Emit sync.
 
         Emits in synchro transmission mode. Wait for
@@ -103,7 +103,7 @@ class Client:
         self._semaphore.acquire()
         self.bus.emit(event,
                       data,
-                      layer_name=layer_name)
+                      namespace=namespace)
 
     def boot(self):
         """Boot."""

@@ -2,7 +2,7 @@
 #
 # Licensed under the MIT License
 
-"""IO modules for input data to DNC model."""
+"""Sequence"""
 import logging
 from margaret.core.memory import VirtualMemory
 from margaret.core.cell import Cell
@@ -126,12 +126,12 @@ class SequenceCell(Cell):
     def __init__(self, seqlen, slot):
         """Init."""
         super(SequenceCell, self).__init__()
-        self.mem_in = SequenceHead.alloc(seqlen, slot)
-        self.mem_out = SequenceHead.alloc(1, slot)
+        self.source = SequenceHead.alloc(seqlen, slot)
+        self.drain = SequenceHead.alloc(1, slot)
         self.pos = 0
         self._seqlen = seqlen
         self._slot = slot
-        self._head = SequenceHead(self.mem_in, self._seqlen, self._slot)
+        self._head = SequenceHead(self.source, self._seqlen, self._slot)
 
     def seek(self, pos):
         """Seek head.
@@ -141,7 +141,7 @@ class SequenceCell(Cell):
         ition, False is returned.
         """
         if pos < self._seqlen:
-            self.mem_out.write_all(self._head.get(pos))
+            self.drain.write_all(self._head.get(pos))
             self.pos = pos
             return True
 
@@ -150,7 +150,7 @@ class SequenceCell(Cell):
     def run(self):
         """Start."""
         while not self._exit:
-            self._trig.wait()
+            self._gate.wait()
             self.seek(self.pos)
-            self._trig.clear()
+            self._gate.clear()
             self._internal_release()

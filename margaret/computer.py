@@ -9,17 +9,15 @@
 import sys
 import threading
 import time
+from collections import namedtuple
 import logging
-
-# module compatible
-try:
-    import queue
-except ImportError:
-    import Queue as queue
+import queue
 
 # LOGGER
 LOGGER = logging.getLogger(__name__)
 
+# Computer job format
+Job = namedtuple('Job', ['chain', 'work', "data"])
 
 class PriorityItem:
     """Priority queue item.
@@ -29,7 +27,7 @@ class PriorityItem:
 
     def __init__(self, elem_to_wrap, priority):
         """Init."""
-        self.data = elem_to_wrap
+        self.job = elem_to_wrap
         self.priority = priority
         self.time = time.time()
 
@@ -96,25 +94,13 @@ class Computer(threading.Thread):
         return self._handler(self.callbacks[event], *args)
 
     def _compute(self, job):
-        """_compute."""
-        if "call" in job:
-            return getattr(self.compute_model, job["call"])(job)
-        return self.compute_model(job)
+        return getattr(self.compute_model, job.work)(job.data)
 
 
-    def _print_message(self, info, process_time, addtext=""):
-        loss = info.get("loss", None)
-        acc = info.get("acc", None)
-        iops = info.get("batch", 1) / process_time
-        message = info.get("message", None)
-        lossprint = " loss: {0:8}".format(loss) if loss is not None else ""
-        accprint = " acc_rate: {0:8}".format(acc) if acc is not None else ""
-        messageprint = " {}".format(message) if message is not None else ""
-
-        message = ("\r({0}/{1})"
-                   "{2}{3}{4} time: {5:.2f} IOPS: {6:.2f} {7} "
+    def _print_message(self, process_time, addtext=""):
+        iops = 1.0 / process_time
+        message = ("\r({0}/{1}) in {2:.2f}s ({3:.2f} IOPS) {4} "
                    .format(self.__datacnt, self.__q.qsize() + self.__datacnt,
-                           lossprint, accprint, messageprint,
                            process_time, iops, addtext))
         sys.stdout.write(message)
         sys.stdout.flush()
@@ -130,40 +116,38 @@ class Computer(threading.Thread):
         output = self._compute(job)
         process_time = time.time() - processstart
 
-        if output is None:
-            self._print_message({}, process_time)
-            return {"job_in": job, "job_out": None}
-
-        info = output.get("info", {})
-
-        # post massage
-        self._print_message(info, process_time)
-
-        # loop event
-        if output.get("loop", False):
-            self.add_queue(job.copy(), 10)
-
         # append info
         machine_info = {
             "datacnt": datacnt,
-            "process_time": process_time
+            "process_time": process_time,
+            "work": job.work,
+            "chain": job.chain,
         }
-        output["info"].update(machine_info)
 
-        return {"job_in": job, "job_out": output}
+        # post massage
+        self._print_message(process_time)
 
-    def _check_job(self, job):
-        if not isinstance(job, dict):
-            return False
+        if output is None:
+            return (None, machine_info)
 
-        if "call" in job:
-            if not isinstance(job["call"], str):
+        # loop event
+        if job.work == "loop":
+            if output is False:
+                return (None, machine_info)
+
+            self.add_queue(job.data, job.work, job.chain, 10)
+
+        return (output, machine_info)
+
+    def _check_job(self, data, work):
+        if work is not None:
+            if not isinstance(work, str):
                 return False
 
-            if job["call"].startswith("_"):
+            if work.startswith("_"):
                 return False
 
-            if not callable(getattr(self.compute_model, job["call"], None)):
+            if not callable(getattr(self.compute_model, work, None)):
                 return False
 
         return True
@@ -179,25 +163,32 @@ class Computer(threading.Thread):
 
         return True
 
-    def add_queue(self, job, priority=3):
+    def add_queue(self, data, work, chain, priority=3):
         """Add_queue, when check_job() return True."""
-        if self._check_job(job):
-            job["time"] = time.time()
-            job["pr"] = priority
+        if self._check_job(data, work):
+            job = Job(chain, work, data)
             self.__q.put(PriorityItem(job, priority))
-            self._trigger_event("accept", job)
+            self._trigger_event("accept")
             return True
 
-        self._trigger_event("reject", job)
+        self._trigger_event("reject")
         return False
 
 
     def run(self):
         """Thread loop."""
+
+        # loop start
+        if callable(getattr(self.compute_model, "setup", None)):
+            self.add_queue(None, "setup", "setup", priority=1)
+
+        if callable(getattr(self.compute_model, "loop", None)):
+            self.add_queue(None, "loop", "loop", priority=2)
+
         while True:
-            next_queue = self.__q.get(block=True).data
-            result = self._exec_queue(next_queue)
-            self._trigger_event("result", result)
-            if result["job_out"] is not None:
-                self._trigger_event("send", result)
+            next_queue = self.__q.get(block=True).job
+            self._trigger_event("fetch", next_queue)
+            output, machine_info = self._exec_queue(next_queue)
+            if output is not None:
+                self._trigger_event("writeback", output, machine_info)
             self.__q.task_done()

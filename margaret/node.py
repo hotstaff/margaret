@@ -9,7 +9,8 @@ import time
 import logging
 
 from margaret.computer import Computer
-from margaret.communicator import Communicator
+from margaret.siobus import BusMaster
+from margaret.sioformat import DefaultConnectionEvents
 
 # logging root logger config
 logging.basicConfig(level=logging.INFO,
@@ -20,15 +21,18 @@ LOGGER = logging.getLogger(__name__)
 class Node:
     """Node booting module."""
 
-    def __init__(self):
+    def __init__(self, **options):
         """Init."""
-        super(Node, self).__init__()
 
-        self.computer_def = getattr(self, "computer_def")
+        # options
+        self.host = options.get('host', "localhost")
+        self.port = options.get('port', 5000)
+        self.namespace = options.get('namespace', '/')
 
-        if 'flags' not in self.computer_def:
-            self.computer_def['flags'] = {}
+        self._chains = {}
 
+        self.computer = None
+        self.bus = None
 
     def __print_config(self):
         """Print node config.
@@ -67,6 +71,78 @@ class Node:
             sys.stdout.flush()
             time.sleep(1)
 
+    def get_chains(self):
+        return self._chains
+
+    def _event(self, name, data):
+        # exec chain
+        for method in self._chains[name][0]:
+            data = getattr(self, method)(data)
+
+        work = self._chains[name][1]
+
+        if data is None:
+            DefaultConnectionEvents.reject(self.bus, self.namespace)
+            return False
+
+        if not self.computer.add_queue(data, work, name):
+            DefaultConnectionEvents.reject(self.bus, self.namespace)
+            return False
+
+        DefaultConnectionEvents.accept(self.bus, self.namespace)
+        return True
+
+    def _responce(self, data, machine_info):
+        chain = machine_info["chain"]
+
+        # no responce
+        if self._chains[chain][2] is None:
+            return True
+
+        responce = self._chains[chain][2][-1]
+
+        # exec chain
+        for method in self._chains[chain][2]:
+            data = getattr(self, method)(data)
+
+        if data is None:
+            return False
+
+
+        self.bus.emit(responce, data, self.namespace)
+        return True
+
+    def on(self, events, work, responces):
+        if not isinstance(events, (list, tuple)):
+            raise TypeError("events is required list or tuple.")
+
+        if not isinstance(work, str):
+            raise TypeError("work is required str.")
+
+        for event in events:
+            if not isinstance(event, str):
+                TypeError("event name is required str")
+            if not callable(getattr(self, event, None)):
+                TypeError("event name is not callable")
+
+        if responces is not None:
+            if not isinstance(responces, (list, tuple)):
+                raise TypeError("responces is required list, tuple.")
+            for responce in responces:
+                if not isinstance(responce, str):
+                    TypeError("responce name is required str")
+                if not callable(getattr(self, responce, None)):
+                    TypeError("responce name is not callable")
+
+        self._chains[events[0]] = [events, work, responces]
+
+        return True
+
+
+    def off(self, name):
+        if self._chains.pop(name, None) is None:
+            return False
+        return True
 
     def boot(self, nowait=False, port=5000):
         """Boot.
@@ -83,16 +159,19 @@ class Node:
         sys.stdout.write("\rStarting socket-DNN server...")
         sys.stdout.flush()
 
-        # DNC start
-        computer = Computer(**self.computer_def)
-        computer.start()
+        # Neural computer start
+        self.computer = Computer(**self.computer_def)
+        self.computer.start()
+        self.computer.set_event("writeback", self._responce)
 
-        # comunication server start
-        comm = Communicator(computer,
-                            encoder=getattr(self, "encode", None),
-                            decoder=getattr(self, "decode", None),
-                            port=port)
-        comm.boot()
+        # comunication bus start
+        self.bus = BusMaster(self.host, self.port)
+        DefaultConnectionEvents.registration_events(self.bus, self.namespace)
+        for chain in self._chains:
+            func = lambda sid, data, chain=chain: self._event(chain, data)
+            self.bus.on(chain, func, self.namespace)
+
+        self.bus.up()
 
         sys.stdout.write("\rStarted socket-DNN server.      \n\n")
         sys.stdout.flush()
