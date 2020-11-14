@@ -14,20 +14,14 @@ import threading
 import logging
 import os
 import socketio
-import eventlet
-
-# module compatible with Python 2.7 and Python 3
-try:
-    import queue
-except ImportError:
-    import Queue as queue
+from flask import Flask
 
 LOGGER = logging.getLogger(__name__)
 
 class Master(threading.Thread):
     """Socket-IO Master class."""
 
-    def __init__(self, host="0.0.0.0", port=5000, debug=False, thread=False):
+    def __init__(self, host="0.0.0.0", port=5000, debug=False):
         """Init."""
         super(Master, self).__init__()
         self.setDaemon(True)
@@ -38,19 +32,12 @@ class Master(threading.Thread):
         if not self.__debug:
             self._logger_disable()
 
-        if thread:
-            from flask import Flask
-            self.sio = socketio.Server(async_mode="threading",
-                                       logger=self.__debug,
-                                       cors_allowed_origins="*")
-            self.__app = Flask(__name__)
-            self.__app.wsgi_app = socketio.WSGIApp(self.sio,
-                                                   self.__app.wsgi_app)
-        else:
-            eventlet.monkey_patch()
-            self.sio = socketio.Server(async_mode="eventlet",
-                                       logger=self.__debug)
-            self.__app = socketio.WSGIApp(self.sio)
+        self.sio = socketio.Server(async_mode="threading",
+                                   logger=self.__debug,
+                                   cors_allowed_origins="*")
+        self.__app = Flask(__name__)
+        self.__app.wsgi_app = socketio.WSGIApp(self.sio,
+                                               self.__app.wsgi_app)
 
     @staticmethod
     def _logger_disable():
@@ -69,16 +56,8 @@ class Master(threading.Thread):
 
     def run(self):
         """Start server."""
-        if self.sio.async_mode == "threading":
-            os.environ["WERKZEUG_RUN_MAIN"] = "true"
-            self.__app.run(threaded=True)
-            return
-
-        eventlet.wsgi.server(
-            eventlet.listen((self.__host, self.__port)),
-            self.__app,
-            log=None,
-            log_output=self.__debug)
+        os.environ["WERKZEUG_RUN_MAIN"] = "true"
+        self.__app.run(threaded=True)
 
 
 class Worker:
@@ -141,8 +120,7 @@ class Bus:
 
     """
 
-    def __init__(self, node_type, host="127.0.0.1", port=5000, start=False,
-                 debug=False):
+    def __init__(self, node_type, host="127.0.0.1", port=5000, debug=False):
         """Init."""
         self.node_type = node_type
         if self.node_type == "master":
@@ -153,9 +131,6 @@ class Bus:
             raise ValueError("Node type must be master or worker.")
 
         self.sio = self.__bus.sio
-
-        if start:
-            self.up()
 
     def _ready_wait(self):
         """Wait for the connection."""
@@ -191,13 +166,13 @@ class BusMaster(Bus):
         """Init."""
         super(BusMaster, self).__init__("master", host, port, debug=debug)
 
-        self.layers = set()
+        self.namespaces = set()
         self._regist_events()
 
     def _regist_events(self):
         pass
 
-    def append_relay(self, layer_name, in_name, out_name=None):
+    def append_relay(self, namespace, in_name, out_name=None):
         """Append client to client relay."""
         if out_name is None:
             out_name = in_name
@@ -205,33 +180,33 @@ class BusMaster(Bus):
         handler = (lambda sid, data:
                    self.sio.emit(out_name,
                                  data,
-                                 namespace=layer_name,
+                                 namespace=namespace,
                                  skip_sid=sid))
 
-        self.sio.on(in_name, handler, namespace=layer_name)
-        self.layers.add(layer_name)
+        self.sio.on(in_name, handler, namespace=namespace)
+        self.namespaces.add(namespace)
 
         LOGGER.info("Append relay %s -> %s on %s",
-                    in_name, out_name, layer_name)
+                    in_name, out_name, namespace)
 
-    def remove_relay(self, layer_name, in_name):
+    def remove_relay(self, namespace, in_name):
         """Remove relay."""
-        self.sio.on(in_name, None, namespace=layer_name)
-        LOGGER.info("Remove relay %s on %s", in_name, layer_name)
+        self.sio.on(in_name, None, namespace=namespace)
+        LOGGER.info("Remove relay %s on %s", in_name, namespace)
 
-    def on(self, event, handler, layer_name):
+    def on(self, event, handler, namespace):
         """On."""
-        self.sio.on(event, handler, namespace=layer_name)
-        LOGGER.info("Regist event %s on %s.", event, layer_name)
+        self.sio.on(event, handler, namespace=namespace)
+        LOGGER.info("Regist event %s on %s.", event, namespace)
 
-    def off(self, event, layer_name):
+    def off(self, event, namespace):
         """Off."""
-        self.sio.on(event, None, namespace=layer_name)
-        LOGGER.info("Unregist event %s on %s.", event, layer_name)
+        self.sio.on(event, None, namespace=namespace)
+        LOGGER.info("Unregist event %s on %s.", event, namespace)
 
-    def emit(self, event, data=None, layer_name=None):
+    def emit(self, event, data=None, namespace=None):
         """Emit."""
-        self.sio.emit(event, data, namespace=layer_name)
+        self.sio.emit(event, data, namespace=namespace)
 
 
 class BusWorker(Bus):
@@ -244,42 +219,43 @@ class BusWorker(Bus):
     def __init__(self, host="127.0.0.1", port=5000, debug=False):
         """Init."""
         super(BusWorker, self).__init__("worker", host, port, debug=debug)
-        self.layer = None
+        self.namespace = None
 
-    def on(self, event, handler, layer_name=None):
+    def on(self, event, handler, namespace=None):
         """On."""
-        if layer_name is None:
-            layer_name = self.layer
+        if namespace is None:
+            namespace = self.namespace
 
-        self.sio.on(event, handler, namespace=layer_name)
-        LOGGER.info("Regist %s on %s.", event, layer_name)
+        self.sio.on(event, handler, namespace=namespace)
+        LOGGER.info("Regist %s on %s.", event, namespace)
         self.update()
 
-    def off(self, event, layer_name=None):
+    def off(self, event, namespace=None):
         """Off."""
-        if layer_name is None:
-            layer_name = self.layer
+        if namespace is None:
+            namespace = self.namespace
 
-        self.sio.on(event, None, namespace=layer_name)
-        LOGGER.info("Unregist %s on %s.", event, layer_name)
+        self.sio.on(event, None, namespace=namespace)
+        LOGGER.info("Unregist %s on %s.", event, namespace)
         self.update()
 
-    def set_layer(self, name):
-        """Set client layer."""
-        self.layer = name
+    def set_namespace(self, namespace):
+        """Set client namespace."""
+        self.namespace = namespace
         self.update()
-        LOGGER.info("Append layer: %s.", self.layer)
+        LOGGER.info("Append namespace: %s.", self.namespace)
 
-    def emit(self, event, data=None, layer_name=None, callback=None):
-        """Transmit data to any layer.
+    def emit(self, event, data=None, namespace=None, callback=None):
+        """Transmit data to any namespace.
 
-        If layer_name is not selected, submit own layer.
+        If namespace is not selected, submit own namespace.
         """
-        if layer_name is None:
-            layer_name = self.layer
-        self.sio.emit(event, data, namespace=layer_name, callback=callback)
+        if namespace is None:
+            namespace = self.namespace
+        self.sio.emit(event, data, namespace=namespace, callback=callback)
 
 
 if __name__ == '__main__':
     DATABUS_MASTER = BusMaster()
+    DATABUS_MASTER.up()
     input("Press any key to exit.")
